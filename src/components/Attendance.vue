@@ -18,6 +18,11 @@ import annotationPlugin from 'chartjs-plugin-annotation'
 import Datepicker from '@vuepic/vue-datepicker'
 import '@vuepic/vue-datepicker/dist/main.css'
 
+// @ts-expect-error
+import { $vfm, VueFinalModal, ModalsContainer } from 'vue-final-modal'
+
+import { format, differenceInMinutes, differenceInMilliseconds } from 'date-fns'
+
 import { dayName, url } from "../resources/utils";
 import { getDatapoints, getGradient, options } from '../resources/attendance-data'
 import { ref } from 'vue';
@@ -25,6 +30,7 @@ import IconOk from './icons/IconOk.vue';
 import IconHelp from './icons/IconHelp.vue';
 import IconCancel from './icons/IconCancel.vue';
 import IconClock from './icons/IconClock.vue';
+import IconClose from './icons/IconClose.vue';
 
 ChartJS.defaults.font.size = 14
 ChartJS.defaults.font.family = "Roboto"
@@ -41,6 +47,30 @@ ChartJS.register(
     annotationPlugin,
 )
 
+enum ShiftStatus {
+    Stamped,
+    Suspicious,
+    Missed,
+}
+
+const parseDate = (s: {start: string, end: string, checkin: string | null, checkout: string | null}) => {
+    const dates = {
+        start: new Date(s.start),
+        end: new Date(s.end),
+    }
+    if (s.checkin === null)
+        Object.assign(dates, {
+            checkin: dates.start,
+            checkout: dates.end,
+        })
+    else
+        Object.assign(dates, {
+            checkin: new Date(s.checkin),
+            checkout: s.checkout === null? null: new Date(s.checkout),
+        })
+    return Object.assign(s, dates)
+}
+
 const date = ref()
 const selected = ref()
 
@@ -54,16 +84,25 @@ primos.sort( (a: any, b: any) => {
 })
 
 export default defineComponent({
-    components: { Line, Datepicker, IconOk, IconHelp, IconCancel, IconClock },
+    components: {
+        IconOk, IconHelp, IconCancel, IconClock, IconClose,// Iconos
+        Line, // chart.js
+        Datepicker, //vue-chartjs
+        // @ts-ignore
+        VueFinalModal, ModalsContainer, // vue-final-modal
+    },
     props: {
-        primoInfo: Object
+        primoInfo: {}
     },
     data() {
         return {
-            shifts: {
-                ideal: NaN,
-                inSchedule: NaN,
-                suspicious: NaN,
+            showModal: false,
+            modalHeight: 0,//calculeModalHeight(),
+            attendance: {
+                scheduled: [],
+                stamped: [],
+                suspicious: [],
+                shifts: new Array<{status: ShiftStatus, block: string, start: Date, end: Date, checkin: Date, checkout: Date}>(),
             },
             data: {
                 labels: [],
@@ -94,13 +133,26 @@ export default defineComponent({
             if (date.value.length === undefined)
                 date.value = [date.value, date.value]
             getDatapoints(selected.value, date.value[0], date.value[1]).then( r => {
-                this.shifts.ideal = r.ideal
-                this.shifts.inSchedule = r.inSchedule.length
-                this.shifts.suspicious = r.suspicious.length
                 this.data.labels = r.labels
-                this.data.datasets[0].data = r.datapoints.map( (p: number) => p === null? NaN: p)
+                this.data.datasets[0].data = r.datapoints.map( (p: number) => p?? NaN)
+                
+                this.attendance.scheduled =
+                    r.shifts
+                        .map(parseDate)
+                        .map( (s: Object) => Object.assign(s, {status: ShiftStatus.Missed}) )
+                this.attendance.stamped =
+                    this.attendance.scheduled
+                        .filter( (s: {id: number}) => s.id !== null )
+                        .map( (s: Object) => Object.assign(s, {status: ShiftStatus.Stamped}) )
+                this.attendance.suspicious =
+                    r.suspicious
+                        .map(parseDate)
+                        .map( (s: Object) => Object.assign(s, {status: ShiftStatus.Suspicious}) )
+                
+                this.attendance.shifts = [...this.attendance.scheduled, ...this.attendance.suspicious]
+                this.attendance.shifts.sort( (s1: {checkin: Date}, s2: {checkin: Date}) => differenceInMilliseconds(s1.checkin, s2.checkin) )
             })
-        }
+        },
     },
     mounted() {
         const startDate = new Date()
@@ -116,10 +168,10 @@ export default defineComponent({
         
         selected.value = this.primoInfo.mail
         date.value = [startDate, endDate]
-        this.updateDatapoints() 
+        this.updateDatapoints()
     },
     setup() {
-        const format = (dates: Date[]) => dates.filter( d => d !== null ).map( date => {
+        const datePickerFormat = (dates: Date[]) => dates?.filter( d => d !== null ).map( date => {
             const day = date.getDate()
             const month = date.getMonth() + 1
             const year = date.getFullYear()
@@ -130,9 +182,13 @@ export default defineComponent({
             dayName,
             date,
             selected,
-            format,
+            datePickerFormat,
             options,
             primos,
+
+            ShiftStatus,
+            format,
+            differenceInMinutes,
         }
     },
 })
@@ -158,26 +214,100 @@ export default defineComponent({
                     v-on:update:modelValue="updateDatapoints()"
                     modelAuto
                     range
-                    :format="format"
+                    :format="datePickerFormat"
                     :dayNames="(_: string, weekStart: number) => dayName(weekStart)"
                     :clearable=false
                     :enableTimePicker=false
                 />
             </div>
-            <div class="side">
+            <div
+                class="side"
+                v-on:click="showModal = true"
+            >
                 <div class="line">
-                    <IconClock class="icon" /> {{ shifts.ideal }}
+                    <IconClock class="icon" /> {{ attendance.scheduled.length }}
                 </div>
                 <div class="line">
-                    <IconOk class="icon" /> {{ shifts.inSchedule }}
+                    <IconOk class="icon" /> {{ attendance.stamped.length }}
                 </div>
                 <div class="line">
-                    <IconCancel class="icon" /> {{ shifts.ideal - shifts.inSchedule }}
+                    <IconCancel class="icon" /> {{ attendance.scheduled.length - attendance.stamped.length }}
                 </div>
                 <div class="line">
-                    <IconHelp class="icon" /> {{ shifts.suspicious }}
+                    <IconHelp class="icon" /> {{ attendance.suspicious.length }}
                 </div>
             </div>
+            <vue-final-modal v-model="showModal" classes="modal-container" content-class="modal-content">
+                <div class="modal__action">
+                    <span
+                        id="modal_title"
+                        class="modal__title"
+                    >
+                        Turnos de {{ primos.find( (p: {mail: string}) => p.mail == selected )?.nick }} ({{ datePickerFormat(date) }})
+                    </span>
+                    <!-- <button class="button modal__button modal__button__cancel" @click="showModal = false">CANCELAR</button> -->
+                    <IconClose class="icon" style="cursor: pointer;" v-on:click="showModal = false"/>
+                </div>
+                <div class="grid_container">
+                    <span class="grid_item grid_header">
+                        <span />
+                        <span>Fecha</span>
+                        <span>Turno</span>
+                        <span>Entrada</span>
+                        <span>Salida</span>
+                    </span>
+                    <span
+                        class="grid_item"
+                        v-for="shift in attendance.shifts"
+                    >
+                        <IconOk
+                            v-if="shift.status == ShiftStatus.Stamped"
+                            class="icon"
+                        />
+                        <IconHelp
+                            v-else-if="shift.status == ShiftStatus.Suspicious"
+                            class="icon"
+                        />
+                        <IconCancel
+                            v-else-if="shift.status == ShiftStatus.Missed"
+                            class="icon"
+                        />
+                        <span>{{ format(shift.start, "dd/MM") }}</span>
+                        <span>{{ shift.start.toLocaleString("es-ES", {weekday: "short"}) }} {{shift.block}}</span>
+                        <span v-if="shift.status == ShiftStatus.Missed">{{ format(shift.checkin, "H:mm") }}</span>
+                        <span v-else>
+                            {{ format(shift.checkin, "H:mm") }}
+                            (<span
+                                style="color: var(--green)"
+                                v-if="differenceInMinutes(shift.start, shift.checkin) >= 0"
+                            >+{{ differenceInMinutes(shift.start, shift.checkin) }}
+                            </span>
+                            <span
+                                style="color: var(--red)"
+                                v-else
+                            >
+                                {{ differenceInMinutes(shift.start, shift.checkin) }}
+                            </span>)
+                        </span>
+                        <span v-if="shift.status == ShiftStatus.Missed">{{ format(shift.checkout, "H:mm") }}</span>
+                        <span v-else-if="shift.checkout != null">
+                            {{ format(shift.checkout, "H:mm") }}
+                            (<span
+                                style="color: var(--green)"
+                                v-if="differenceInMinutes(shift.end, shift.checkout) >= 0"
+                            >+{{ differenceInMinutes(shift.end, shift.checkout) }}
+                            </span>
+                            <span
+                                style="color: var(--red)"
+                                v-else
+                            >
+                                {{ differenceInMinutes(shift.end, shift.checkout) }}
+                            </span>)
+                        </span>
+                        <span v-else />
+                    </span>
+                </div>
+            </vue-final-modal>
         </div>
         <Line :height="200" :chartData="(data as any)" :chart-options="(options as any)"/>
     </div>
@@ -200,6 +330,7 @@ export default defineComponent({
     display: inline-flex;
     align-items: center;
     gap: 20px;
+    cursor: pointer;
 }
 
 .line {
@@ -210,7 +341,7 @@ export default defineComponent({
 }
 
 .icon {
-    height: 75%;
+    height: 2em;
 }
 
 select {
@@ -244,5 +375,63 @@ select:hover {
     --dp-menu-border-color: var(--gray);
     --dp-border-color-hover: var(--white);
     --dp-success-color: var(--green);
+}
+</style>
+
+<style scoped>
+:deep(.modal-container) {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+:deep(.modal-content) {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    max-height: 90%;
+    width: 40%;
+    padding: 1rem;
+    border: 2px solid var(--gray);
+    border-radius: 1rem;
+    background: var(--color-background);
+    gap: 1rem;
+}
+.modal__title {
+    margin: 0 2rem 0 0;
+    font-size: 1.5rem;
+    font-weight: 700;
+}
+.modal__action {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+}
+.modal__button {
+    padding: .5rem 1rem;
+}
+.modal__button__cancel {
+    background-color: var(--green);
+}
+
+.grid_container {
+    display: grid;
+    overflow: auto;
+}
+.grid_item { 
+    display: grid;
+    grid-template-columns: 1fr 2fr 2fr 2fr 2fr;
+    gap: 0px 0px;
+    grid-auto-flow: row;
+
+    align-items: center;
+    padding: .5rem 0;
+    border-bottom: 2px solid var(--gray);
+}
+
+.grid_header {
+    position: sticky;
+    top: 0;
+    background-color: var(--color-background);
+    z-index: 1;
 }
 </style>
